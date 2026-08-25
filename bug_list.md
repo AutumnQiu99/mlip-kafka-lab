@@ -84,6 +84,57 @@ Connect to ipv6#[::1]:9092 failed: Connection refused
 
 ---
 
+## Offset and Seeking Issues
+
+### Error: `IllegalStateError: No current assignment for partition <topic>-0`
+**Problem**: You called `seek()` on a consumer that subscribed to a topic (topic passed to the constructor) but has not been assigned a partition yet. Assignment happens asynchronously during the group rebalance.
+
+**Solution**:
+- Use `consumer.assign([TopicPartition(topic, 0)])` instead of subscribing. Assignment is immediate, so `seek()` works right away. This is what the notebook's `explorer` consumer does.
+- If you do want to subscribe, call `consumer.poll(timeout_ms=5000)` once first to force the rebalance, then `seek()`.
+
+---
+
+### Error: `OffsetOutOfRangeError`, or a seek that silently lands somewhere else
+**Problem**: You seeked to an offset outside `[beginning_offsets, end_offsets)`. What happens next depends entirely on `auto_offset_reset`:
+- `'earliest'` → silently resets to the log start offset
+- `'latest'` → silently resets to the high watermark (so you read nothing until new messages arrive)
+- `'none'` → raises `OffsetOutOfRangeError`
+
+**Solution**: This is the intended behaviour, not a bug. Use `'none'` while experimenting so mistakes are loud rather than silent, and always clamp computed offsets into the valid range in production code.
+
+---
+
+### Error: `offsets_for_times()` returns `{TopicPartition(...): None}`
+**Problem**: No message exists at or after the timestamp you asked for — usually because the timestamp is in the future, or is in seconds instead of **milliseconds**.
+
+**Solution**:
+1. Multiply by 1000: `int(time.time() * 1000)`, or `int(dt.timestamp() * 1000)` for a `datetime`.
+2. Pick a timestamp inside your producer run. The record timestamps printed by the notebook (`record.timestamp`) and by `kcat -f "%o %T: %s\n"` are already in ms — copy one of those and adjust.
+3. Always check for `None` before reading `.offset` off the result.
+
+---
+
+### Error: `poll()` returns `{}` / no messages after seeking
+**Problem**: Either you seeked at or past the high watermark (there is nothing after it yet), or the timeout was too short for the first fetch.
+
+**Solution**:
+- Print `beginning_offsets()` and `end_offsets()` and confirm your target offset is `< end_offsets`.
+- Give the first `poll()` a longer timeout (2000+ ms); the first call also has to fetch metadata.
+- Remember `end_offsets()` is the offset of the *next* message to be written, so the last readable offset is `end_offsets - 1`.
+
+---
+
+### kcat: consumer hangs, or an offset returns fewer messages than expected
+**Problem**: By default kcat keeps waiting for new messages once it reaches the end of the log, so a command that has already printed everything looks stuck. And a relative offset is capped by the log length.
+
+**Solution**:
+- Add `-e` to exit at the end of the log, and/or `-c <count>` to stop after N messages.
+- Negative offsets are relative to the end, so `-o -50` on a 25-message topic just gives you all 25.
+- An absolute offset at or past the high watermark prints nothing and waits — that is expected out-of-range behaviour, not a broken command.
+
+---
+
 ## Environment Issues
 
 ### Error: `ModuleNotFoundError: No module named 'kafka'`
